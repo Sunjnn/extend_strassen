@@ -19,8 +19,9 @@ void initMatrix(float *A, int m, int n) {
 void gemm(float *C, float *A, float *B, int m, int k, int n) {
     for (int i = 0; i < m; ++i) {
         for (int j = 0; j < n; ++j) {
+            C[i + j * m] = 0.0f;
             for (int l = 0; l < k; ++l) {
-                C[i * m + j] += A[i * m + l] * B[l * k + j];
+                C[i + j * m] += A[i + l * m] * B[l + j * k];
             }
         }
     }
@@ -29,7 +30,9 @@ void gemm(float *C, float *A, float *B, int m, int k, int n) {
 void test(float *A, float *B, int m, int n) {
     for (int i = 0; i < m; ++i) {
         for (int j = 0; j < n; ++j) {
-            if (A[i * m + j] - B[i * m + j] > 0.001 || A[i * m + j] - B[i * m + j] < -0.001) {
+            float diff = A[i * m + j] - B[i * m + j];
+            diff /= A[i * m + j];
+            if (diff > 0.001 || diff < -0.001) {
                 printf("wrong result. i:%d j:%d\n", i, j);
             }
         }
@@ -56,9 +59,9 @@ int main() {
     cublasHandle_t handle;
     cublasCreate(&handle);
 
-    float alpha = 10.f, beta = 0.0f;
+    float alpha = 1.0f, beta = 0.0f;
 
-    cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_T, M, N, K, &alpha, d_A, M, d_B, K, &beta, d_C, M);
+    cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K, &alpha, d_A, M, d_B, K, &beta, d_C, M);
     cublasGetMatrix(M, N, sizeof(float), d_C, M, h_C, M);
 
     gemm(h_CTest, h_A, h_B, M, K, N);

@@ -1,2 +1,9 @@
 .vscode/
 main
+/x64/Debug
+/.vs/extend_strassen/v15
+*.props
+*.sln
+*.vcxproj
+*.filters
+*.user
