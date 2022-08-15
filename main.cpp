@@ -4,9 +4,9 @@
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
-#define M 1024
-#define K 1024
-#define N 1024
+#define M 2048
+#define K 2048
+#define N 2048
 
 
 void initMatrix(float *A, int m, int n) {
