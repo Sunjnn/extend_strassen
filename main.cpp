@@ -35,7 +35,12 @@ void gemmcublas(float *C, float *A, float *B, int m, int k, int n, cublasHandle_
 
     //cudaStream_t stream;
     //cudaStreamCreate(&stream);
-    cublasSetStream(handle, stream);
+    cublasStatus_t status;
+    status = cublasSetStream(handle, stream);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        printf("error in line %d: ", __LINE__);
+        return;
+    }
 
     float *d_A{nullptr}, *d_B{nullptr}, *d_C{nullptr};
     cudaMalloc(&d_A, sizeof(float) * m * k);
@@ -310,6 +315,13 @@ void gemmstrassen(float *C, float *A, float *B, int m, int k, int n) {
     free(M_7A);
     free(M_7B);
     free(M7);
+
+    for (int i = 0; i < 7; ++i) {
+        cublasDestroy(handleArray[i]);
+        cudaStreamDestroy(streamArray[i]);
+    }
+    free(handleArray);
+    free(streamArray);
 }
 
 void gemmstrassenNOomp(float *C, float *A, float *B, int m, int k, int n, cublasHandle_t handle) {
