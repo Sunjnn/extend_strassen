@@ -6,10 +6,29 @@
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
-#define M 8192
-#define K 8192
-#define N 8192
+#define M 2048
+#define K 2048
+#define N 2048
 
+
+#define CHECKCUDA(call)                                                     \
+{                                                                           \
+    const cudaError_t error = call;                                         \
+    if (error != cudaSuccess)                                               \
+    {                                                                       \
+        printf("Error: %s:$d", __FILE__, __LINE__);                         \
+        printf("code:%d, reason:%s\n", error, cudaGetErrorString(error));   \
+        exit(1);                                                            \
+    }                                                                       \
+}                                                                           \
+
+#define CHECKCUBLAS(call) {                                                                                             \
+    const cublasStatus_t error = call;                                                                                  \
+    if (error != CUBLAS_STATUS_SUCCESS) {                                                                               \
+        printf("Error: %s:%d", __FILE__, __LINE__);                                                                     \
+        printf("code: %d, name: %s, string: %s\n", error, cublasGetStatusName(error), cublasGetStatusString(error));    \
+    }                                                                                                                   \
+}                                                                                                                       \
 
 void initMatrix(float *A, int m, int n) {
     for (int i = 0; i < m * n; ++i) {
@@ -30,39 +49,59 @@ void gemm(float *C, float *A, float *B, int m, int k, int n) {
 }
 
 void gemmcublas(float *C, float *A, float *B, int m, int k, int n, cublasHandle_t handle, cudaStream_t stream) {
-    //cublasHandle_t handle;
-    //cublasCreate(&handle);
+    cublasStatus_t cublasStatus = CUBLAS_STATUS_SUCCESS;
+    cublasStatus = cublasSetStream(handle, stream);
+    CHECKCUBLAS(cublasStatus);
 
-    //cudaStream_t stream;
-    //cudaStreamCreate(&stream);
-    cublasStatus_t status;
-    status = cublasSetStream(handle, stream);
-    if (status != CUBLAS_STATUS_SUCCESS) {
-        printf("error in line %d: ", __LINE__);
-        return;
-    }
+    //void *workspace{ nullptr };
+    //CHECKCUDA(cudaMallocAsync(&workspace, 1024 * 1024, stream));
+    //CHECKCUBLAS(cublasSetWorkspace(handle, workspace, 1024 * 1024));
 
+    cudaError_t cudaStatus;
+    float *d_A{nullptr}, *d_B{nullptr}, *d_C{nullptr};
+    cudaStatus = cudaMallocAsync(&d_A, sizeof(float) * m * k, stream);
+    CHECKCUDA(cudaStatus);
+    cudaStatus = cudaMallocAsync(&d_B, sizeof(float) * k * n, stream);
+    CHECKCUDA(cudaStatus);
+    cudaStatus = cudaMallocAsync(&d_C, sizeof(float) * m * n, stream);
+    CHECKCUDA(cudaStatus);
+
+    cublasStatus = cublasSetMatrixAsync(m, k, sizeof(float), A, m, d_A, m, stream);
+    CHECKCUBLAS(cublasStatus);
+    cublasStatus = cublasSetMatrixAsync(k, n, sizeof(float), B, k, d_B, k, stream);
+    CHECKCUBLAS(cublasStatus);
+
+    float alpha = 1.0f, beta = 0.0f;
+
+    cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, m, n, k, &alpha, d_A, m, d_B, k, &beta, d_C, m);
+    cublasStatus = cublasGetMatrixAsync(m, n, sizeof(float), d_C, m, C, m, stream);
+    CHECKCUBLAS(cublasStatus);
+
+    cudaStatus = cudaFreeAsync(d_A, stream);
+    CHECKCUDA(cudaStatus);
+    cudaStatus = cudaFreeAsync(d_B, stream);
+    CHECKCUDA(cudaStatus);
+    cudaStatus = cudaFreeAsync(d_C, stream);
+    CHECKCUDA(cudaStatus);
+}
+
+void gemmcublas(float *C, float *A, float *B, int m, int k, int n, cublasHandle_t handle) {
     float *d_A{nullptr}, *d_B{nullptr}, *d_C{nullptr};
     cudaMalloc(&d_A, sizeof(float) * m * k);
     cudaMalloc(&d_B, sizeof(float) * k * n);
     cudaMalloc(&d_C, sizeof(float) * m * n);
 
-    //cublasSetMatrix(m, n, sizeof(float), A, m, d_A, m);
-    cublasSetMatrixAsync(m, n, sizeof(float), A, m, d_A, m, stream);
-    //cublasSetMatrix(m, n, sizeof(float), B, k, d_B, k);
-    cublasSetMatrixAsync(m, n, sizeof(float), A, m, d_A, m, stream);
+    cublasSetMatrix(m, k, sizeof(float), A, m, d_A, m);
+    cublasSetMatrix(k, n, sizeof(float), B, k, d_B, k);
 
     float alpha = 1.0f, beta = 0.0f;
 
     cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, m, n, k, &alpha, d_A, m, d_B, k, &beta, d_C, m);
-    //cublasGetMatrix(m, n, sizeof(float), d_C, m, C, m);
-    cublasGetMatrixAsync(m, n, sizeof(float), d_C, m, C, m, stream);
+    cublasGetMatrix(m, n, sizeof(float), d_C, m, C, m);
 
     cudaFree(d_A);
     cudaFree(d_B);
     cudaFree(d_C);
-    //cublasDestroy(handle);
-    //cudaStreamDestroy(stream);
 }
 
 void getSubmatrixPointer(float *A, int mDiv2, int nDiv2, int ld, float *&A_11, float *&A_12, float *&A_21, float *&A_22) {
@@ -146,111 +185,56 @@ void gemmstrassen(float *C, float *A, float *B, int m, int k, int n) {
         {
 #pragma omp section
             {
-                id = omp_get_thread_num();
-                // printf("ID: %d\n", id);
                 matrixAdd(M_1A, A_11, A_22, mDiv2, kDiv2, mDiv2, m, m);
                 matrixAdd(M_1B, B_11, B_22, kDiv2, nDiv2, kDiv2, k, k);
-                gemmcublas(M1, M_1A, M_1B, mDiv2, kDiv2, nDiv2, handleArray[id], streamArray[id]);
+                gemmcublas(M1, M_1A, M_1B, mDiv2, kDiv2, nDiv2, handleArray[0], streamArray[0]);
+                //gemmcublas(M1, M_1A, M_1B, mDiv2, kDiv2, nDiv2, handleArray[0]);
             }
 
 #pragma omp section
             {
-                id = omp_get_thread_num();
-                // printf("ID: %d\n", id);
                 matrixAdd(M_2A, A_21, A_22, mDiv2, kDiv2, mDiv2, m, m);
                 matrixCopy(M_2B, B_11, kDiv2, nDiv2, kDiv2, k);
-                gemmcublas(M2, M_2A, M_2B, mDiv2, kDiv2, nDiv2, handleArray[id], streamArray[id]);
+                gemmcublas(M2, M_2A, M_2B, mDiv2, kDiv2, nDiv2, handleArray[1], streamArray[1]);
+                //gemmcublas(M2, M_2A, M_2B, mDiv2, kDiv2, nDiv2, handleArray[1]);
             }
 #pragma omp section
             {
-                id = omp_get_thread_num();
-                // printf("ID: %d\n", id);
                 matrixCopy(M_3A, A_11, mDiv2, kDiv2, mDiv2, m);
                 matrixMinus(M_3B, B_12, B_22, kDiv2, nDiv2, kDiv2, k, k);
-                gemmcublas(M3, M_3A, M_3B, mDiv2, kDiv2, nDiv2, handleArray[id], streamArray[id]);
+                gemmcublas(M3, M_3A, M_3B, mDiv2, kDiv2, nDiv2, handleArray[2], streamArray[2]);
+                //gemmcublas(M3, M_3A, M_3B, mDiv2, kDiv2, nDiv2, handleArray[2]);
             }
 #pragma omp section
             {
-                id = omp_get_thread_num();
-                // printf("ID: %d\n", id);
                 matrixCopy(M_4A, A_22, mDiv2, kDiv2, mDiv2, m);
                 matrixMinus(M_4B, B_21, B_11, kDiv2, nDiv2, kDiv2, k, k);
-                gemmcublas(M4, M_4A, M_4B, mDiv2, kDiv2, nDiv2, handleArray[id], streamArray[id]);
+                gemmcublas(M4, M_4A, M_4B, mDiv2, kDiv2, nDiv2, handleArray[3], streamArray[3]);
+                //gemmcublas(M4, M_4A, M_4B, mDiv2, kDiv2, nDiv2, handleArray[3]);
             }
 #pragma omp section
             {
-                id = omp_get_thread_num();
-                // printf("ID: %d\n", id);
                 matrixAdd(M_5A, A_11, A_12, mDiv2, kDiv2, mDiv2, m, m);
                 matrixCopy(M_5B, B_22, kDiv2, nDiv2, kDiv2, k);
-                gemmcublas(M5, M_5A, M_5B, mDiv2, kDiv2, nDiv2, handleArray[id], streamArray[id]);
+                gemmcublas(M5, M_5A, M_5B, mDiv2, kDiv2, nDiv2, handleArray[4], streamArray[4]);
+                //gemmcublas(M5, M_5A, M_5B, mDiv2, kDiv2, nDiv2, handleArray[4]);
             }
 #pragma omp section
             {
-                id = omp_get_thread_num();
-                // printf("ID: %d\n", id);
                 matrixMinus(M_6A, A_21, A_11, mDiv2, kDiv2, mDiv2, m, m);
                 matrixAdd(M_6B, B_11, B_12, kDiv2, nDiv2, kDiv2, k, k);
-                gemmcublas(M6, M_6A, M_6B, mDiv2, kDiv2, nDiv2, handleArray[id], streamArray[id]);
+                gemmcublas(M6, M_6A, M_6B, mDiv2, kDiv2, nDiv2, handleArray[5], streamArray[5]);
+                //gemmcublas(M6, M_6A, M_6B, mDiv2, kDiv2, nDiv2, handleArray[5]);
             }
 #pragma omp section
             {
-                id = omp_get_thread_num();
-                // printf("ID: %d\n", id);
                 matrixMinus(M_7A, A_12, A_22, mDiv2, kDiv2, mDiv2, m, m);
                 matrixAdd(M_7B, B_21, B_22, kDiv2, nDiv2, kDiv2, k, k);
-                gemmcublas(M7, M_7A, M_7B, mDiv2, kDiv2, nDiv2, handleArray[id], streamArray[id]);
+                gemmcublas(M7, M_7A, M_7B, mDiv2, kDiv2, nDiv2, handleArray[6], streamArray[6]);
+                //gemmcublas(M7, M_7A, M_7B, mDiv2, kDiv2, nDiv2, handleArray[6]);
             }
         }
     }
-    //float *M_1A = (float*)malloc(sizeof(float) * mDiv2 * kDiv2);
-    //matrixAdd(M_1A, A_11, A_22, mDiv2, kDiv2, mDiv2, m, m);
-    //float *M_1B = (float*)malloc(sizeof(float) * kDiv2 * nDiv2);
-    //matrixAdd(M_1B, B_11, B_22, kDiv2, nDiv2, kDiv2, k, k);
-    //float *M1 = (float*)malloc(sizeof(float) * mDiv2 * nDiv2);
-    //gemmcublas(M1, M_1A, M_1B, mDiv2, kDiv2, nDiv2);
-
-    //float *M_2A = (float*)malloc(sizeof(float) * mDiv2 * kDiv2);
-    //matrixAdd(M_2A, A_21, A_22, mDiv2, kDiv2, mDiv2, m, m);
-    //float *M_2B = (float*)malloc(sizeof(float) * kDiv2 * nDiv2);
-    //matrixCopy(M_2B, B_11, kDiv2, nDiv2, kDiv2, k);
-    //float *M2 = (float*)malloc(sizeof(float) * mDiv2 * nDiv2);
-    //gemmcublas(M2, M_2A, M_2B, mDiv2, kDiv2, nDiv2);
-
-    //float *M_3A = (float*)malloc(sizeof(float) * mDiv2 * kDiv2);
-    //matrixCopy(M_3A, A_11, mDiv2, kDiv2, mDiv2, m);
-    //float *M_3B = (float*)malloc(sizeof(float) * kDiv2 * nDiv2);
-    //matrixMinus(M_3B, B_12, B_22, kDiv2, nDiv2, kDiv2, k, k);
-    //float *M3 = (float*)malloc(sizeof(float) * mDiv2 * nDiv2);
-    //gemmcublas(M3, M_3A, M_3B, mDiv2, kDiv2, nDiv2);
-
-    //float *M_4A = (float*)malloc(sizeof(float) * mDiv2 * kDiv2);
-    //matrixCopy(M_4A, A_22, mDiv2, kDiv2, mDiv2, m);
-    //float *M_4B = (float*)malloc(sizeof(float) * kDiv2 * nDiv2);
-    //matrixMinus(M_4B, B_21, B_11, kDiv2, nDiv2, kDiv2, k, k);
-    //float *M4 = (float*)malloc(sizeof(float) * mDiv2 * nDiv2);
-    //gemmcublas(M4, M_4A, M_4B, mDiv2, kDiv2, nDiv2);
-
-    //float *M_5A = (float*)malloc(sizeof(float) * mDiv2 * kDiv2);
-    //matrixAdd(M_5A, A_11, A_12, mDiv2, kDiv2, mDiv2, m, m);
-    //float *M_5B = (float*)malloc(sizeof(float) * kDiv2 * nDiv2);
-    //matrixCopy(M_5B, B_22, kDiv2, nDiv2, kDiv2, k);
-    //float *M5 = (float*)malloc(sizeof(float) * mDiv2 * nDiv2);
-    //gemmcublas(M5, M_5A, M_5B, mDiv2, kDiv2, nDiv2);
-
-    //float *M_6A = (float*)malloc(sizeof(float) * mDiv2 * kDiv2);
-    //matrixMinus(M_6A, A_21, A_11, mDiv2, kDiv2, mDiv2, m, m);
-    //float *M_6B = (float*)malloc(sizeof(float) * kDiv2 * nDiv2);
-    //matrixAdd(M_6B, B_11, B_12, kDiv2, nDiv2, kDiv2, k, k);
-    //float *M6 = (float*)malloc(sizeof(float) * mDiv2 * nDiv2);
-    //gemmcublas(M6, M_6A, M_6B, mDiv2, kDiv2, nDiv2);
-
-    //float *M_7A = (float*)malloc(sizeof(float) * mDiv2 * kDiv2);
-    //matrixMinus(M_7A, A_12, A_22, mDiv2, kDiv2, mDiv2, m, m);
-    //float *M_7B = (float*)malloc(sizeof(float) * kDiv2 * nDiv2);
-    //matrixAdd(M_7B, B_21, B_22, kDiv2, nDiv2, kDiv2, k, k);
-    //float *M7 = (float*)malloc(sizeof(float) * mDiv2 * nDiv2);
-    //gemmcublas(M7, M_7A, M_7B, mDiv2, kDiv2, nDiv2);
 
     float *C_11, *C_12, *C_21, *C_22;
     getSubmatrixPointer(C, mDiv2, nDiv2, m, C_11, C_12, C_21, C_22);
@@ -281,18 +265,6 @@ void gemmstrassen(float *C, float *A, float *B, int m, int k, int n) {
             }
         }
     }
-
-    //matrixAdd(C_11, M1, M4, mDiv2, nDiv2, m, mDiv2, mDiv2);
-    //matrixMinus(C_11, C_11, M5, mDiv2, nDiv2, m, m, mDiv2);
-    //matrixAdd(C_11, C_11, M7, mDiv2, nDiv2, m, m, mDiv2);
-
-    //matrixAdd(C_21, M2, M4, mDiv2, nDiv2, m, mDiv2, mDiv2);
-
-    //matrixAdd(C_12, M3, M5, mDiv2, nDiv2, m, mDiv2, mDiv2);
-
-    //matrixMinus(C_22, M1, M2, mDiv2, nDiv2, m, mDiv2, mDiv2);
-    //matrixAdd(C_22, C_22, M3, mDiv2, nDiv2, m, m, mDiv2);
-    //matrixAdd(C_22, C_22, M6, mDiv2, nDiv2, m, m, mDiv2);
 
     free(M_1A);
     free(M_1B);
@@ -439,6 +411,7 @@ int main() {
     float *h_B = (float*)malloc(sizeof(float) * K * N);
     float *h_C = (float*)malloc(sizeof(float) * M * N);
     float *h_CTest = (float*)malloc(sizeof(float) * M * N);
+    //float *h_CTest1 = (float*)malloc(sizeof(float) * M * N);
 
     initMatrix(h_A, M, K);
     initMatrix(h_B, K, N);
@@ -448,18 +421,11 @@ int main() {
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
-    //cudaEventRecord(start, 0);
-    //gemmcublas(h_C, h_A, h_B, M, K, N);
-    //cudaEventRecord(stop, 0);
-    //cudaEventSynchronize(stop);
-
-    //cudaEventElapsedTime(&time, start, stop);
-    //printf("gemmcublas times %f\n", time);
-
-    //gemm(h_CTest, h_A, h_B, M, K, N);
     cublasHandle_t handle;
     cublasCreate(&handle);
-    gemmcublas(h_CTest, h_A, h_B, M, K, N, handle, 0);
+    gemmcublas(h_CTest, h_A, h_B, M, K, N, handle);
+    //gemm(h_CTest1, h_A, h_B, M, K, N);
+    //test(h_CTest, h_CTest1, M, N);
 
     cudaDeviceSynchronize();
     cudaEventRecord(start, 0);
@@ -469,7 +435,8 @@ int main() {
 
     cudaEventElapsedTime(&time, start, stop);
     printf("gemmstarssen times %f ms\n", time);
-    //test(h_C, h_CTest, M, N);
+    test(h_C, h_CTest, M, N);
+    // memset(h_C, 0, sizeof(float) * M * N);
 
     cudaEventRecord(start, 0);
     gemmstrassenNOomp(h_C, h_A, h_B, M, K, N, handle);
@@ -478,7 +445,7 @@ int main() {
 
     cudaEventElapsedTime(&time, start, stop);
     printf("gemmstarssenNOomp times %f ms\n", time);
-    //test(h_C, h_CTest, M, N);
+    test(h_C, h_CTest, M, N);
 
     free(h_A);
     free(h_B);
