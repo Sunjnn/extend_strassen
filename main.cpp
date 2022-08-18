@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <ctime>
 #include <omp.h>
+#include <math.h>
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -29,6 +30,11 @@
         printf("code: %d, name: %s, string: %s\n", error, cublasGetStatusName(error), cublasGetStatusString(error));    \
     }                                                                                                                   \
 }                                                                                                                       \
+
+#define EXIT() {                    \
+    printf("Enter to exit:");      \
+    getchar();                      \
+}                                   \
 
 void initMatrix(float *A, int m, int n) {
     for (int i = 0; i < m * n; ++i) {
@@ -109,6 +115,29 @@ void getSubmatrixPointer(float *A, int mDiv2, int nDiv2, int ld, float *&A_11, f
     A_21 = A + mDiv2;
     A_12 = A + nDiv2 * ld;
     A_22 = A_12 + mDiv2;
+}
+
+class blockMatrix {
+public:
+    float **pointers = nullptr;
+    int dimM = 0;
+    int dimN = 0;
+    blockMatrix();
+    blockMatrix(float *A, int m, int n, int ldA, int blockM, int blockN);
+};
+
+blockMatrix::blockMatrix() {}
+
+blockMatrix::blockMatrix(float *A, int m, int n, int ldA, int blockM, int blockN) {
+    dimM = ceil(m / blockM);
+    dimN = ceil(n / blockN);
+
+    pointers = (float**)malloc(sizeof(float*) * dimM * dimN);
+    for (int i = 0; i < dimM; ++i) {
+        for (int j = 0; j < dimN; ++j) {
+            pointers[i + j * dimM] = A + i * blockM + j * blockN * ldA;
+        }
+    }
 }
 
 void matrixAdd(float *C, float *A, float *B, int m, int n, int ldC, int ldA, int ldB) {
@@ -406,7 +435,7 @@ void test(float *A, float *B, int m, int n) {
     }
 }
 
-int main() {
+void testGemm() {
     float *h_A = (float*)malloc(sizeof(float) * M * K);
     float *h_B = (float*)malloc(sizeof(float) * K * N);
     float *h_C = (float*)malloc(sizeof(float) * M * N);
@@ -451,6 +480,31 @@ int main() {
     free(h_B);
     free(h_C);
     free(h_CTest);
+}
 
+void testBlockmatrix() {
+    float *A = (float*)malloc(sizeof(float) * M * K);
+    initMatrix(A, M, K);
+
+    int blockM = 1024;
+    int blockN = 1024;
+    blockMatrix bmatPtr(A, M, K, M, blockM, blockN);
+
+    for (int blockI = 0; blockI < bmatPtr.dimM; ++blockI) {
+        for (int blockJ = 0; blockJ < bmatPtr.dimN; ++blockJ) {
+            int i = blockI * blockM;
+            int j = blockJ * blockN;
+            if (A[i + j * M] != *bmatPtr.pointers[blockI + blockJ * bmatPtr.dimM]) {
+                printf("blockI: %d, blockJ: %d\n", blockI, blockJ);
+            }
+        }
+    }
+
+    EXIT();
+    return;
+}
+
+int main() {
+    testBlockmatrix();
     return 0;
 }
