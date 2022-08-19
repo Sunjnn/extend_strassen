@@ -7,3 +7,4 @@ main
 *.vcxproj
 *.filters
 *.user
+/.vs/extend_strassen
