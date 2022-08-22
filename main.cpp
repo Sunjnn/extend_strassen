@@ -4,13 +4,16 @@
 #include <omp.h>
 #include <math.h>
 #include <vector>
+#include <deque>
+#include <thread>
+#include <mutex>
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
-#define M 2048
-#define K 2048
-#define N 2048
+#define M 8192
+#define K 8192
+#define N 8192
 
 
 #define CHECKCUDA(call)                                                     \
@@ -39,7 +42,8 @@
 
 void initMatrix(float *A, int m, int n) {
     for (int i = 0; i < m * n; ++i) {
-        A[i] = i;
+        //A[i] = i;
+        A[i] = 1;
     }
     return;
 }
@@ -602,6 +606,123 @@ void gemmstrassenNOomp(float *C, float *A, float *B, int m, int k, int n, cublas
     free(M7);
 }
 
+int getdevicecount() {
+    int deviceCount = 0;
+    CHECKCUDA(cudaGetDeviceCount(&deviceCount));
+    return deviceCount;
+}
+
+float *getdeviceprop(int deviceCount) {
+    if (deviceCount == 0) {
+        printf("There are no avilable device(s) that support CUDA\n");
+        exit(1);
+    }
+    else {
+        printf("Delete %d CUDA Capable device(s)\n", deviceCount);
+    }
+
+    float* memMiBs = (float*)malloc(sizeof(float) * deviceCount);
+
+    for (int dev = 0; dev < deviceCount; ++dev) {
+        //CHECKCUDA(cudaSetDevice(dev));
+        cudaDeviceProp deviceProp;
+        CHECKCUDA(cudaGetDeviceProperties(&deviceProp, dev));
+        //float memMiB = deviceProp.totalGlobalMem / 1048576.0f;
+        memMiBs[dev] = deviceProp.totalGlobalMem / 1048576.0f;
+    }
+
+    return memMiBs;
+}
+
+class threadPool {
+public:
+    std::mutex mut;
+    blockMatrix *bmatA;
+    blockMatrix *bmatB;
+    blockMatrix *bmatC;
+    int m;
+    int k;
+    int n;
+    int blockM;
+    int blockK;
+    int blockN;
+    std::deque<int*> tasks;
+    int deviceCount;
+    float* memMiBs;
+
+    threadPool() {}
+    threadPool(float* C, float* A, float* B, int m, int k, int n, int blockM, int blockK, int blockN);
+    void threadGPU(int dev);
+    void threadCPU();
+};
+
+threadPool::threadPool(float* C, float* A, float* B, int m, int k, int n, int blockM, int blockK, int blockN): m(m), k(k), n(n), blockM(blockM), blockK(blockK), blockN(blockN) {
+    bmatA = new blockMatrix(A, m, k, m, blockM, blockK);
+    bmatB = new blockMatrix(B, k, n, k, blockK, blockN);
+    bmatC = new blockMatrix(C, m, n, m, blockM, blockN);
+
+    deviceCount = getdevicecount();
+    memMiBs = getdeviceprop(deviceCount);
+    for (int i = 0; i < bmatC->dimM; ++i) {
+        for (int j = 0; j < bmatC->dimN; ++j) {
+            //int task[2] = { i, j };
+            int *task = new int[2];
+            task[0] = i;
+            task[1] = j;
+            tasks.push_back(task);
+        }
+    }
+}
+
+void threadPool::threadGPU(int dev) {
+    CHECKCUDA(cudaSetDevice(dev));
+    while (1) {
+        if (tasks.empty()) {
+            break;
+        }
+        mut.lock();
+        int *task = tasks.front();
+        tasks.pop_front();
+        mut.unlock();
+
+        for (int k = 0; k < bmatA->dimN; ++k) {
+            gemmstrassen(bmatC->getBlockMatrix(task[0], task[1]), bmatA->getBlockMatrix(task[0], k), bmatB->getBlockMatrix(k, task[1]), blockM, blockK, blockN, m, k, m);
+        }
+    }
+}
+
+void threadPool::threadCPU() {
+    float mem = (blockM * blockK + blockK * blockN + blockM * blockN) / 1048576.0f * 7.0f;
+#pragma omp parallel for collapse(2)
+    for (int dev = 0; dev < deviceCount; ++dev)
+    {
+        int num_thread = memMiBs[dev] / mem;
+        for (int threadID = 0; threadID < num_thread; ++threadID) {
+            threadGPU(dev);
+        }
+    }
+}
+
+//void gemmBlock(float *C, float *A, float *B, int m, int k, int n, int blockM, int blockK, int blockN) {
+//    blockMatrix bmatA(A, m, k, m, blockM, blockK);
+//    blockMatrix bmatB(B, k, n, k, blockK, blockN);
+//    blockMatrix bmatC(C, m, n, m, blockM, blockN);
+//
+//    float* memMiBs = getdeviceprop(getdevicecount());
+//    std::deque<int[2]> tasks;
+//
+//    for (int i = 0; i < bmatC.dimM; ++i) {
+//        for (int j = 0; j < bmatC.dimN; ++j) {
+//            int task[2];
+//            task[0] = i;
+//            task[1] = j;
+//            tasks.push_back(task);
+//        }
+//    }
+//
+//
+//}
+
 void test(float *A, float *B, int m, int n) {
     for (int i = 0; i < m; ++i) {
         for (int j = 0; j < n; ++j) {
@@ -657,9 +778,9 @@ void testGemm() {
     int blockM = M / 4;
     int blockK = K / 4;
     int blockN = N / 4;
-    blockMatrix bmatA(h_A, M, K, M, blockM, blockK);
-    blockMatrix bmatB(h_B, K, N, K, blockK, blockN);
-    blockMatrix bmatC(h_C, M, N, M, blockM, blockN);
+    //blockMatrix bmatA(h_A, M, K, M, blockM, blockK);
+    //blockMatrix bmatB(h_B, K, N, K, blockK, blockN);
+    //blockMatrix bmatC(h_C, M, N, M, blockM, blockN);
 
     //std::vector<std::vector<int, int>> tasks;
     //for (int blockI = 0; blockI < bmatC.dimM; ++blockI) {
@@ -675,15 +796,18 @@ void testGemm() {
     cudaDeviceSynchronize();
     cudaEventRecord(start, 0);
 
-#pragma omp parallel for collapse(2) num_threads(4)
-    for (int i = 0; i < bmatC.dimM; ++i) {
-        for (int j = 0; j < bmatC.dimN; ++j) {
-            for (int k = 0; k < bmatA.dimN; ++k) {
-                printf("k:%d, i:%d, j:%d, ID:%d\n", k, i, j, omp_get_thread_num());
-                gemmstrassen(bmatC.getBlockMatrix(i, j), bmatA.getBlockMatrix(i, k), bmatB.getBlockMatrix(k, j), blockM, blockK, blockN, M, K, M);
-            }
-        }
-    }
+//#pragma omp parallel for collapse(2) num_threads(4)
+//    for (int i = 0; i < bmatC.dimM; ++i) {
+//        for (int j = 0; j < bmatC.dimN; ++j) {
+//            for (int k = 0; k < bmatA.dimN; ++k) {
+//                printf("k:%d, i:%d, j:%d, ID:%d\n", k, i, j, omp_get_thread_num());
+//                gemmstrassen(bmatC.getBlockMatrix(i, j), bmatA.getBlockMatrix(i, k), bmatB.getBlockMatrix(k, j), blockM, blockK, blockN, M, K, M);
+//            }
+//        }
+//    }
+
+    threadPool pool(h_C, h_A, h_B, M, K, N, blockM, blockK, blockN);
+    pool.threadCPU();
 
     cudaEventRecord(stop, 0);
     cudaEventSynchronize(stop);
